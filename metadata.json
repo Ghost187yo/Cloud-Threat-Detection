@@ -1,0 +1,6 @@
+{
+  "name": "Cloud Threat Detector",
+  "description": "Real-time AI-powered agent for threat detection, zero-day profiling, and vulnerability identification across distributed cloud infrastructure.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
