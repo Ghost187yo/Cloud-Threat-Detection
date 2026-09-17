@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { CloudNode, SecurityScenario, ThreatAnalysisResult, ChatMessage } from "./types";
+import { CloudNode, SecurityScenario, ThreatAnalysisResult, ChatMessage, ScheduledExportJob, ExportHistoryRecord, ExportColumnOptions } from "./types";
 import { MetricCards } from "./components/MetricCards";
 import { InfrastructureMap } from "./components/InfrastructureMap";
 import { ThreatSimulator } from "./components/ThreatSimulator";
@@ -8,8 +8,13 @@ import { SecurityChat } from "./components/SecurityChat";
 import { MlThreatClassifier } from "./components/MlThreatClassifier";
 import { GmailAlerts } from "./components/GmailAlerts";
 import { LogIngestionChart } from "./components/LogIngestionChart";
-import { Shield, Server, Clock, HelpCircle, Activity, LayoutGrid, Terminal, Info, Search, X } from "lucide-react";
-import { motion } from "motion/react";
+import { D3RiskHeatmap } from "./components/D3RiskHeatmap";
+import { D3ThreatForecastChart } from "./components/D3ThreatForecastChart";
+import { ScheduledExportsModal } from "./components/ScheduledExportsModal";
+import { ExportPreviewModal, EXPORT_COLUMN_LABELS } from "./components/ExportPreviewModal";
+import { ExportConfirmModal } from "./components/ExportConfirmModal";
+import { Shield, Server, Clock, HelpCircle, Activity, LayoutGrid, Terminal, Info, Search, X, Download, FileJson, FileSpreadsheet, Copy, Check, CheckCircle, Calendar, Eye, Loader2, SlidersHorizontal, CheckSquare, Square } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
 
 // Establish 6 realistic cloud nodes representing distributed services
 const INITIAL_NODES: CloudNode[] = [
@@ -117,18 +122,298 @@ export default function App() {
   // Always get the latest node state from nodes array to ensure logs are fully synchronous
   const activeNode = nodes.find((n) => n.id === selectedNode.id) || selectedNode;
 
+  const [exportStartTime, setExportStartTime] = useState<string>("");
+  const [exportEndTime, setExportEndTime] = useState<string>("");
+
+  // Check if a log entry falls within the optional start-time and end-time window
+  const isLogInTimeWindow = (logStr: string, start: string, end: string): boolean => {
+    if (!start && !end) return true;
+    const timeMatch = logStr.match(/\[(\d{2}:\d{2}(?::\d{2})?)\]/);
+    if (!timeMatch) return true;
+
+    const logTime = timeMatch[1].length === 5 ? `${timeMatch[1]}:00` : timeMatch[1];
+    const startFormatted = start ? (start.length === 5 ? `${start}:00` : start) : "00:00:00";
+    const endFormatted = end ? (end.length === 5 ? `${end}:59` : end) : "23:59:59";
+
+    return logTime >= startFormatted && logTime <= endFormatted;
+  };
+
   // Real-time filtered log lines
   const filteredLogs = activeNode.logs.filter((log) => {
     const matchesSearch = log.toLowerCase().includes(logSearchQuery.toLowerCase());
+    let matchesSeverity = true;
     if (logSeverityFilter === "critical") {
-      const isCritical = log.includes("[CRITICAL]") || log.includes("[ALERT]") || log.includes("ATTACK DETECTED");
-      return matchesSearch && isCritical;
+      matchesSeverity = log.includes("[CRITICAL]") || log.includes("[ALERT]") || log.includes("ATTACK DETECTED");
     }
-    return matchesSearch;
+    const matchesTime = isLogInTimeWindow(log, exportStartTime, exportEndTime);
+    return matchesSearch && matchesSeverity && matchesTime;
   });
 
   const [autoScroll, setAutoScroll] = useState(true);
+  const [isCopied, setIsCopied] = useState(false);
+  const [exportFormat, setExportFormat] = useState<"json" | "csv">("json");
+  const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
+  const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [showColumnDropdown, setShowColumnDropdown] = useState(false);
+  const [exportColumns, setExportColumns] = useState<ExportColumnOptions>({
+    logIndex: true,
+    nodeId: true,
+    nodeName: true,
+    nodeType: true,
+    region: true,
+    ipAddress: true,
+    severity: true,
+    logContent: true,
+    exportedAt: true,
+  });
+
+  const handleToggleExportColumn = (key: keyof ExportColumnOptions) => {
+    setExportColumns((prev) => {
+      const activeCount = Object.values(prev).filter(Boolean).length;
+      if (prev[key] && activeCount <= 1) return prev;
+      return { ...prev, [key]: !prev[key] };
+    });
+  };
+
+  const handleSelectAllColumns = () => {
+    setExportColumns({
+      logIndex: true,
+      nodeId: true,
+      nodeName: true,
+      nodeType: true,
+      region: true,
+      ipAddress: true,
+      severity: true,
+      logContent: true,
+      exportedAt: true,
+    });
+  };
+
+  const handleSelectMinimalColumns = () => {
+    setExportColumns({
+      logIndex: true,
+      nodeId: false,
+      nodeName: false,
+      nodeType: false,
+      region: false,
+      ipAddress: false,
+      severity: true,
+      logContent: true,
+      exportedAt: false,
+    });
+  };
+  const [exportToasts, setExportToasts] = useState<Array<{
+    id: string;
+    filename: string;
+    format: "JSON" | "CSV";
+    logCount: number;
+    timestamp: string;
+  }>>([]);
+
+  // Scheduled Recurring Log Export State
+  const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
+  const [scheduledJobs, setScheduledJobs] = useState<ScheduledExportJob[]>([
+    {
+      id: "job-hourly-ingress",
+      nodeId: "node-gateway",
+      nodeName: "Hybrid Edge Gateway",
+      format: "json",
+      intervalMinutes: 60,
+      intervalLabel: "Hourly (Every 1 Hour)",
+      severityFilter: "all",
+      status: "active",
+      createdAt: new Date().toLocaleTimeString(),
+      nextRunAt: Date.now() + 60 * 60 * 1000,
+      runCount: 1,
+      lastRunAt: new Date(Date.now() - 30 * 60 * 1000).toLocaleTimeString()
+    }
+  ]);
+
+  const [exportHistory, setExportHistory] = useState<ExportHistoryRecord[]>([]);
+
+  const addExportToast = (filename: string, format: "JSON" | "CSV", logCount: number) => {
+    const newToast = {
+      id: `toast-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      filename,
+      format,
+      logCount,
+      timestamp: new Date().toLocaleTimeString()
+    };
+    setExportToasts((prev) => [...prev, newToast]);
+    setTimeout(() => {
+      setExportToasts((prev) => prev.filter((t) => t.id !== newToast.id));
+    }, 4500);
+  };
+
+  const dismissToast = (id: string) => {
+    setExportToasts((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  // Execute a scheduled or manual export programmatically
+  const executeScheduledJob = (job: ScheduledExportJob | Omit<ScheduledExportJob, "id" | "createdAt" | "nextRunAt" | "runCount">) => {
+    const targetNode = nodes.find((n) => n.id === job.nodeId) || activeNode;
+    let targetLogs = targetNode.logs;
+    if (job.severityFilter === "critical") {
+      targetLogs = targetLogs.filter((log) => log.includes("[CRITICAL]") || log.includes("[ALERT]") || log.includes("ATTACK DETECTED"));
+    }
+
+    const exportTimestamp = new Date().toISOString();
+    const sanitizedNodeId = targetNode.id.replace(/[^a-z0-9_-]/gi, "_");
+    const fullFileName = `${sanitizedNodeId}_auto_export_${exportTimestamp.slice(0, 10)}_${Date.now().toString().slice(-4)}.${job.format}`;
+    const formatUpper = job.format.toUpperCase() as "JSON" | "CSV";
+
+    let contentString = "";
+    let mimeType = "application/json";
+
+    if (job.format === "json") {
+      mimeType = "application/json";
+      contentString = JSON.stringify({
+        node: {
+          id: targetNode.id,
+          name: targetNode.name,
+          type: targetNode.type,
+          provider: targetNode.provider,
+          ip: targetNode.ipAddress,
+          region: targetNode.region
+        },
+        exportType: "Automated Recurring Scheduled Dump",
+        exportedAt: exportTimestamp,
+        totalMatchedLogs: targetLogs.length,
+        logs: targetLogs
+      });
+    } else {
+      mimeType = "text/csv";
+      const headers = ["Log Index", "Node ID", "Node Name", "Node Type", "Region", "IP Address", "Severity", "Log Content", "Exported At"];
+      const csvRows = [
+        headers.join(","),
+        ...targetLogs.map((logStr, idx) => {
+          let severity = "INFO";
+          if (logStr.includes("[CRITICAL]") || logStr.includes("[ALERT]") || logStr.includes("ATTACK DETECTED")) {
+            severity = "CRITICAL";
+          } else if (logStr.includes("[WARN]")) {
+            severity = "WARN";
+          }
+          const cleanLog = `"${logStr.replace(/"/g, '""')}"`;
+          return [idx + 1, targetNode.id, `"${targetNode.name}"`, `"${targetNode.type}"`, `"${targetNode.region}"`, targetNode.ipAddress, severity, cleanLog, exportTimestamp].join(",");
+        })
+      ];
+      contentString = csvRows.join("\n");
+    }
+
+    const historyRecord: ExportHistoryRecord = {
+      id: `hist-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      jobId: "id" in job ? job.id : undefined,
+      nodeId: targetNode.id,
+      nodeName: targetNode.name,
+      filename: fullFileName,
+      format: formatUpper,
+      logCount: targetLogs.length,
+      type: "Scheduled",
+      status: "Completed",
+      timestamp: new Date().toLocaleTimeString(),
+      downloadData: {
+        content: contentString,
+        mimeType
+      }
+    };
+
+    setExportHistory((prev) => [historyRecord, ...prev]);
+    addExportToast(fullFileName, formatUpper, targetLogs.length);
+  };
+
+  const handleCreateScheduledJob = (newJobData: Omit<ScheduledExportJob, "id" | "createdAt" | "nextRunAt" | "runCount">) => {
+    const newJob: ScheduledExportJob = {
+      ...newJobData,
+      id: `job-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      createdAt: new Date().toLocaleTimeString(),
+      nextRunAt: Date.now() + newJobData.intervalMinutes * 60 * 1000,
+      runCount: 0
+    };
+    setScheduledJobs((prev) => [...prev, newJob]);
+  };
+
+  const handleToggleJobStatus = (id: string) => {
+    setScheduledJobs((prev) =>
+      prev.map((j) => (j.id === id ? { ...j, status: j.status === "active" ? "paused" : "active" } : j))
+    );
+  };
+
+  const handleDeleteJob = (id: string) => {
+    setScheduledJobs((prev) => prev.filter((j) => j.id !== id));
+  };
+
+  const handleRunJobNow = (id: string) => {
+    const targetJob = scheduledJobs.find((j) => j.id === id);
+    if (!targetJob) return;
+    executeScheduledJob(targetJob);
+    setScheduledJobs((prev) =>
+      prev.map((j) =>
+        j.id === id
+          ? {
+              ...j,
+              lastRunAt: new Date().toLocaleTimeString(),
+              nextRunAt: Date.now() + j.intervalMinutes * 60 * 1000,
+              runCount: j.runCount + 1
+            }
+          : j
+      )
+    );
+  };
+
+  const handleDownloadCompletedExport = (record: ExportHistoryRecord) => {
+    if (!record.downloadData) return;
+    const blob = new Blob([record.downloadData.content], { type: record.downloadData.mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", record.filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Automated background daemon that executes due scheduled jobs
+  useEffect(() => {
+    const daemonInterval = setInterval(() => {
+      const now = Date.now();
+      setScheduledJobs((prevJobs) => {
+        let hasChanges = false;
+        const updatedJobs = prevJobs.map((job) => {
+          if (job.status === "active" && now >= job.nextRunAt) {
+            hasChanges = true;
+            executeScheduledJob(job);
+            return {
+              ...job,
+              lastRunAt: new Date().toLocaleTimeString(),
+              nextRunAt: now + job.intervalMinutes * 60 * 1000,
+              runCount: job.runCount + 1
+            };
+          }
+          return job;
+        });
+        return hasChanges ? updatedJobs : prevJobs;
+      });
+    }, 5000);
+
+    return () => clearInterval(daemonInterval);
+  }, [nodes]);
+
   const logsContainerRef = useRef<HTMLDivElement>(null);
+
+  // Copy filtered logs to clipboard as plain text
+  const handleCopyLogs = () => {
+    if (filteredLogs.length === 0) return;
+    const plainTextLogs = filteredLogs.join("\n");
+    navigator.clipboard.writeText(plainTextLogs).then(() => {
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    }).catch((err) => {
+      console.error("Failed to copy logs to clipboard:", err);
+    });
+  };
 
   // Auto-scroll logic when log stream updates
   useEffect(() => {
@@ -136,6 +421,169 @@ export default function App() {
       logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
     }
   }, [filteredLogs, autoScroll]);
+
+  // Export current filtered log view as JSON or CSV file
+  const handleExportLogs = (targetFormat?: "json" | "csv") => {
+    const format = targetFormat || exportFormat;
+    if (filteredLogs.length === 0 || isExporting) return;
+
+    setIsExporting(true);
+    setExportProgress(15);
+
+    setTimeout(() => {
+      setExportProgress(45);
+    }, 150);
+
+    setTimeout(() => {
+      setExportProgress(80);
+    }, 350);
+
+    setTimeout(() => {
+      setExportProgress(100);
+
+      const exportTimestamp = new Date().toISOString();
+      const structuredLogs = filteredLogs.map((logStr, idx) => {
+        let severity = "INFO";
+        if (logStr.includes("[CRITICAL]") || logStr.includes("[ALERT]") || logStr.includes("ATTACK DETECTED")) {
+          severity = "CRITICAL";
+        } else if (logStr.includes("[WARN]")) {
+          severity = "WARN";
+        }
+
+        return {
+          logIndex: idx + 1,
+          nodeId: activeNode.id,
+          nodeName: activeNode.name,
+          nodeType: activeNode.type,
+          region: activeNode.region,
+          ipAddress: activeNode.ipAddress,
+          provider: activeNode.provider,
+          severity,
+          logContent: logStr,
+          exportedAt: exportTimestamp
+        };
+      });
+
+      const sanitizedNodeId = activeNode.id.replace(/[^a-z0-9_-]/gi, "_");
+      const windowSuffix = (exportStartTime || exportEndTime) 
+        ? `_win_${(exportStartTime || "start").replace(/:/g, "")}_to_${(exportEndTime || "end").replace(/:/g, "")}` 
+        : "";
+      const filename = `${sanitizedNodeId}_logs_${exportTimestamp.slice(0, 10)}${windowSuffix}`;
+
+      if (format === "json") {
+        const jsonLogs = filteredLogs.map((logStr, idx) => {
+          let severity = "INFO";
+          if (logStr.includes("[CRITICAL]") || logStr.includes("[ALERT]") || logStr.includes("ATTACK DETECTED")) {
+            severity = "CRITICAL";
+          } else if (logStr.includes("[WARN]")) {
+            severity = "WARN";
+          }
+
+          const rowObj: Record<string, any> = {};
+          if (exportColumns.logIndex) rowObj.logIndex = idx + 1;
+          if (exportColumns.nodeId) rowObj.nodeId = activeNode.id;
+          if (exportColumns.nodeName) rowObj.nodeName = activeNode.name;
+          if (exportColumns.nodeType) rowObj.nodeType = activeNode.type;
+          if (exportColumns.region) rowObj.region = activeNode.region;
+          if (exportColumns.ipAddress) rowObj.ipAddress = activeNode.ipAddress;
+          if (exportColumns.severity) rowObj.severity = severity;
+          if (exportColumns.logContent) rowObj.logContent = logStr;
+          if (exportColumns.exportedAt) rowObj.exportedAt = exportTimestamp;
+
+          return rowObj;
+        });
+
+        const jsonContent = JSON.stringify({
+          node: {
+            id: activeNode.id,
+            name: activeNode.name,
+            type: activeNode.type,
+            region: activeNode.region,
+            ipAddress: activeNode.ipAddress,
+            status: activeNode.status
+          },
+          filter: {
+            query: logSearchQuery || "none",
+            severityFilter: logSeverityFilter,
+            timeWindow: {
+              startTime: exportStartTime || "unrestricted",
+              endTime: exportEndTime || "unrestricted"
+            }
+          },
+          exportedAt: exportTimestamp,
+          activeColumnsCount: Object.values(exportColumns).filter(Boolean).length,
+          totalMatchedLogs: filteredLogs.length,
+          logs: jsonLogs
+        });
+
+        const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.setAttribute("download", `${filename}.json`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        const fullFileName = `${filename}.json`;
+        addExportToast(fullFileName, "JSON", filteredLogs.length);
+      } else if (format === "csv") {
+        const activeHeaders: string[] = [];
+        if (exportColumns.logIndex) activeHeaders.push("Log Index");
+        if (exportColumns.nodeId) activeHeaders.push("Node ID");
+        if (exportColumns.nodeName) activeHeaders.push("Node Name");
+        if (exportColumns.nodeType) activeHeaders.push("Node Type");
+        if (exportColumns.region) activeHeaders.push("Region");
+        if (exportColumns.ipAddress) activeHeaders.push("IP Address");
+        if (exportColumns.severity) activeHeaders.push("Severity");
+        if (exportColumns.logContent) activeHeaders.push("Log Content");
+        if (exportColumns.exportedAt) activeHeaders.push("Exported At");
+
+        const csvRows = [
+          activeHeaders.join(","),
+          ...filteredLogs.map((logStr, idx) => {
+            let severity = "INFO";
+            if (logStr.includes("[CRITICAL]") || logStr.includes("[ALERT]") || logStr.includes("ATTACK DETECTED")) {
+              severity = "CRITICAL";
+            } else if (logStr.includes("[WARN]")) {
+              severity = "WARN";
+            }
+
+            const fields: (string | number)[] = [];
+            if (exportColumns.logIndex) fields.push(idx + 1);
+            if (exportColumns.nodeId) fields.push(`"${activeNode.id}"`);
+            if (exportColumns.nodeName) fields.push(`"${activeNode.name.replace(/"/g, '""')}"`);
+            if (exportColumns.nodeType) fields.push(`"${activeNode.type.replace(/"/g, '""')}"`);
+            if (exportColumns.region) fields.push(`"${activeNode.region}"`);
+            if (exportColumns.ipAddress) fields.push(`"${activeNode.ipAddress}"`);
+            if (exportColumns.severity) fields.push(`"${severity}"`);
+            if (exportColumns.logContent) fields.push(`"${logStr.replace(/"/g, '""')}"`);
+            if (exportColumns.exportedAt) fields.push(`"${exportTimestamp}"`);
+
+            return fields.join(",");
+          })
+        ];
+
+        const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.setAttribute("download", `${filename}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+
+        const fullFileName = `${filename}.csv`;
+        addExportToast(fullFileName, "CSV", filteredLogs.length);
+      }
+
+      setTimeout(() => {
+        setIsExporting(false);
+        setExportProgress(0);
+      }, 300);
+    }, 550);
+  };
 
   // Keep a mock live clock going
   useEffect(() => {
@@ -387,6 +835,21 @@ export default function App() {
           underAttackNodeId={underAttackId}
         />
 
+        {/* D3 Regional Threat & Security Risk Heatmap */}
+        <D3RiskHeatmap
+          nodes={nodes}
+          selectedNodeId={selectedNode.id}
+          onSelectNode={(node) => setSelectedNode(node)}
+          underAttackNodeId={underAttackId}
+        />
+
+        {/* D3 Predictive Threat Probability Forecast Line Chart */}
+        <D3ThreatForecastChart
+          nodes={nodes}
+          selectedNodeId={selectedNode.id}
+          underAttackNodeId={underAttackId}
+        />
+
         {/* Two-Column Workspace split: Threat Selector / Terminal & AI Analysis / Virtual Specialist Chat */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6" id="workspace-columns-layout">
           
@@ -459,29 +922,279 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Severity Toggle */}
-                <div className="flex items-center gap-1 bg-[#0d0d0f] border border-[#2a2a2c] rounded p-1 shrink-0 text-xs font-mono">
-                  <button
-                    onClick={() => setLogSeverityFilter("all")}
-                    className={`px-3 py-1 rounded text-[11px] transition-all font-semibold ${
-                      logSeverityFilter === "all"
-                        ? "bg-[#1d1d21] border border-[#3a3a3c] text-white"
-                        : "text-gray-400 hover:text-[#e1e1e3] border border-transparent"
-                    }`}
-                  >
-                    All Logs ({activeNode.logs.length})
-                  </button>
-                  <button
-                    onClick={() => setLogSeverityFilter("critical")}
-                    className={`px-3 py-1 rounded text-[11px] transition-all font-semibold flex items-center gap-1.5 ${
-                      logSeverityFilter === "critical"
-                        ? "bg-red-950/40 border border-red-900/40 text-red-400"
-                        : "text-gray-400 hover:text-red-400 border border-transparent"
-                    }`}
-                  >
-                    <span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block animate-pulse" />
-                    Critical Only ({activeNode.logs.filter(log => log.includes("[CRITICAL]") || log.includes("[ALERT]") || log.includes("ATTACK DETECTED")).length})
-                  </button>
+                {/* Severity Toggle, Time Window Picker & Log Export Action Group */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1 bg-[#0d0d0f] border border-[#2a2a2c] rounded p-1 shrink-0 text-xs font-mono">
+                    <button
+                      onClick={() => setLogSeverityFilter("all")}
+                      className={`px-3 py-1 rounded text-[11px] transition-all font-semibold ${
+                        logSeverityFilter === "all"
+                          ? "bg-[#1d1d21] border border-[#3a3a3c] text-white"
+                          : "text-gray-400 hover:text-[#e1e1e3] border border-transparent"
+                      }`}
+                    >
+                      All Logs ({activeNode.logs.length})
+                    </button>
+                    <button
+                      onClick={() => setLogSeverityFilter("critical")}
+                      className={`px-3 py-1 rounded text-[11px] transition-all font-semibold flex items-center gap-1.5 ${
+                        logSeverityFilter === "critical"
+                          ? "bg-red-950/40 border border-red-900/40 text-red-400"
+                          : "text-gray-400 hover:text-red-400 border border-transparent"
+                      }`}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block animate-pulse" />
+                      Critical Only ({activeNode.logs.filter(log => log.includes("[CRITICAL]") || log.includes("[ALERT]") || log.includes("ATTACK DETECTED")).length})
+                    </button>
+                  </div>
+
+                  {/* Time Window Filter Segment Picker */}
+                  <div className="flex items-center gap-1.5 bg-[#0d0d0f] border border-[#2a2a2c] rounded p-1 shrink-0 text-xs font-mono" id="log-time-window-group">
+                    <span className="text-[10px] text-gray-400 px-1 font-semibold flex items-center gap-1 select-none">
+                      <Clock className="h-3 w-3 text-cyan-400" /> Time Window:
+                    </span>
+
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="time"
+                        step="1"
+                        value={exportStartTime}
+                        onChange={(e) => setExportStartTime(e.target.value)}
+                        className="bg-[#161619] border border-[#2a2a2c] text-gray-200 text-[11px] font-mono rounded px-1.5 py-0.5 focus:border-cyan-500 focus:outline-none"
+                        title="Optional Start Time (HH:MM or HH:MM:SS)"
+                        id="input-export-start-time"
+                      />
+                      <span className="text-gray-500 text-[10px] select-none font-sans">to</span>
+                      <input
+                        type="time"
+                        step="1"
+                        value={exportEndTime}
+                        onChange={(e) => setExportEndTime(e.target.value)}
+                        className="bg-[#161619] border border-[#2a2a2c] text-gray-200 text-[11px] font-mono rounded px-1.5 py-0.5 focus:border-cyan-500 focus:outline-none"
+                        title="Optional End Time (HH:MM or HH:MM:SS)"
+                        id="input-export-end-time"
+                      />
+
+                      {(exportStartTime || exportEndTime) ? (
+                        <button
+                          onClick={() => {
+                            setExportStartTime("");
+                            setExportEndTime("");
+                          }}
+                          className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-950/60 hover:bg-amber-900/80 border border-amber-800/60 text-amber-300 transition-all flex items-center gap-0.5"
+                          title="Reset time window filter"
+                          id="btn-reset-time-filter"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                          Reset
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-1 pl-0.5">
+                          <button
+                            onClick={() => {
+                              setExportStartTime("19:40");
+                              setExportEndTime("19:50");
+                            }}
+                            className="px-1.5 py-0.5 rounded text-[9px] bg-[#161619] hover:bg-cyan-950/50 hover:text-cyan-300 border border-[#2a2a2c] text-gray-400 transition-all"
+                            title="Quick filter: 19:40 to 19:50 window"
+                          >
+                            19:40-19:50
+                          </button>
+                          <button
+                            onClick={() => {
+                              setExportStartTime("19:50");
+                              setExportEndTime("20:00");
+                            }}
+                            className="px-1.5 py-0.5 rounded text-[9px] bg-[#161619] hover:bg-cyan-950/50 hover:text-cyan-300 border border-[#2a2a2c] text-gray-400 transition-all"
+                            title="Quick filter: 19:50 to 20:00 window"
+                          >
+                            19:50-20:00
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Export Filtered Log View Button Group with Format Toggle */}
+                  <div className="flex items-center gap-1.5 bg-[#0d0d0f] border border-[#2a2a2c] rounded p-1 shrink-0 text-xs font-mono" id="log-export-group">
+                    <span className="text-[10px] text-gray-500 px-1 font-semibold flex items-center gap-1 select-none">
+                      Format:
+                    </span>
+                    
+                    {/* Format Selector Toggle Pills */}
+                    <div className="flex items-center gap-1 bg-[#161619] border border-[#2a2a2c] rounded p-0.5">
+                      <button
+                        onClick={() => setExportFormat("json")}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-all flex items-center gap-1 ${
+                          exportFormat === "json"
+                            ? "bg-amber-950/70 text-amber-300 border border-amber-800/70 shadow-sm font-bold"
+                            : "text-gray-400 hover:text-gray-200 border border-transparent"
+                        }`}
+                        title="Select Compressed JSON export format"
+                        id="toggle-export-json"
+                      >
+                        <FileJson className={`h-3 w-3 ${exportFormat === "json" ? "text-amber-400" : "text-gray-500"}`} />
+                        Compressed JSON
+                        {exportFormat === "json" && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />}
+                      </button>
+                      
+                      <button
+                        onClick={() => setExportFormat("csv")}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-all flex items-center gap-1 ${
+                          exportFormat === "csv"
+                            ? "bg-emerald-950/70 text-emerald-300 border border-emerald-800/70 shadow-sm font-bold"
+                            : "text-gray-400 hover:text-gray-200 border border-transparent"
+                        }`}
+                        title="Select Standard CSV export format"
+                        id="toggle-export-csv"
+                      >
+                        <FileSpreadsheet className={`h-3 w-3 ${exportFormat === "csv" ? "text-emerald-400" : "text-gray-500"}`} />
+                        Standard CSV
+                        {exportFormat === "csv" && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />}
+                      </button>
+                    </div>
+
+                    {/* Column Selector Dropdown Toggle */}
+                    <div className="relative">
+                      <button
+                        onClick={() => setShowColumnDropdown(!showColumnDropdown)}
+                        className={`px-2 py-1 rounded text-[11px] font-semibold border transition-all flex items-center gap-1 ${
+                          showColumnDropdown
+                            ? "bg-blue-950/80 border-blue-700 text-blue-300"
+                            : "bg-[#161619] hover:bg-blue-950/50 hover:text-blue-300 border-[#2a2a2c] text-gray-300"
+                        }`}
+                        title="Toggle specific log columns/fields to include in export"
+                        id="btn-toggle-column-dropdown"
+                      >
+                        <SlidersHorizontal className="h-3 w-3 text-cyan-400" />
+                        Columns ({Object.values(exportColumns).filter(Boolean).length}/9)
+                      </button>
+
+                      {showColumnDropdown && (
+                        <div className="absolute right-0 top-full mt-1.5 w-64 bg-[#111115] border border-[#2e2e34] rounded-lg shadow-2xl p-3 z-30 space-y-2">
+                          <div className="flex items-center justify-between pb-1.5 border-b border-[#222228] text-[11px] font-bold text-gray-200">
+                            <span>Toggle Export Columns</span>
+                            <div className="flex items-center gap-2 text-[10px]">
+                              <button
+                                onClick={handleSelectAllColumns}
+                                className="text-blue-400 hover:underline"
+                              >
+                                All
+                              </button>
+                              <span className="text-gray-600">|</span>
+                              <button
+                                onClick={handleSelectMinimalColumns}
+                                className="text-gray-400 hover:text-blue-300 hover:underline"
+                              >
+                                Minimal
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
+                            {(Object.keys(EXPORT_COLUMN_LABELS) as Array<keyof ExportColumnOptions>).map((colKey) => {
+                              const isChecked = exportColumns[colKey];
+                              return (
+                                <button
+                                  key={colKey}
+                                  onClick={() => handleToggleExportColumn(colKey)}
+                                  className={`w-full px-2 py-1 rounded text-left text-[11px] flex items-center justify-between transition-colors ${
+                                    isChecked
+                                      ? "bg-blue-950/50 text-blue-200 font-semibold"
+                                      : "hover:bg-[#18181e] text-gray-400"
+                                  }`}
+                                >
+                                  <span className="truncate">{EXPORT_COLUMN_LABELS[colKey]}</span>
+                                  {isChecked ? (
+                                    <CheckSquare className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                                  ) : (
+                                    <Square className="h-3.5 w-3.5 text-gray-600 shrink-0" />
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Preview Sample Button */}
+                    <button
+                      onClick={() => setIsPreviewModalOpen(true)}
+                      disabled={filteredLogs.length === 0}
+                      className="px-2 py-1 rounded text-[11px] font-semibold bg-[#161619] hover:bg-blue-950/60 hover:text-blue-300 border border-[#2a2a2c] hover:border-blue-800/40 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center gap-1"
+                      title="Preview sample of first 10 rows in selected format"
+                      id="btn-preview-export"
+                    >
+                      <Eye className="h-3 w-3 text-blue-400" />
+                      Preview
+                    </button>
+
+                    {/* Export Action Button */}
+                    <button
+                      onClick={() => setIsConfirmModalOpen(true)}
+                      disabled={filteredLogs.length === 0 || isExporting}
+                      className="relative overflow-hidden px-2.5 py-1 rounded text-[11px] font-semibold bg-blue-950/40 hover:bg-blue-900/60 text-blue-300 border border-blue-800/50 hover:border-blue-700/70 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-1.5 ml-0.5"
+                      title={`Export filtered logs as ${exportFormat === "json" ? "Compressed JSON" : "Standard CSV"}`}
+                      id="btn-export-file"
+                    >
+                      {isExporting ? (
+                        <>
+                          <Loader2 className="h-3 w-3 text-cyan-400 animate-spin shrink-0" />
+                          <span>Generating ({exportProgress}%)</span>
+                        </>
+                      ) : (
+                        <>
+                          <Download className="h-3 w-3 text-blue-400" />
+                          <span>Export ({exportFormat.toUpperCase()})</span>
+                        </>
+                      )}
+
+                      {/* Visual Progress Bar Indicator */}
+                      {isExporting && (
+                        <div
+                          className="absolute bottom-0 left-0 h-0.5 bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-150"
+                          style={{ width: `${exportProgress}%` }}
+                        />
+                      )}
+                    </button>
+
+                    {/* Scheduled Recurring Exports Manager Toggle */}
+                    <button
+                      onClick={() => setIsScheduleModalOpen(true)}
+                      className="px-2.5 py-1 rounded text-[11px] font-semibold bg-[#161619] hover:bg-cyan-950/60 hover:text-cyan-300 border border-[#2a2a2c] hover:border-cyan-800/50 text-gray-300 transition-all flex items-center gap-1.5"
+                      title="Manage recurring scheduled log exports and view automated dump archives"
+                      id="btn-open-schedules"
+                    >
+                      <Calendar className="h-3 w-3 text-cyan-400" />
+                      Schedules ({scheduledJobs.filter((j) => j.status === "active").length})
+                    </button>
+
+                    {/* Copy to Clipboard */}
+                    <button
+                      onClick={handleCopyLogs}
+                      disabled={filteredLogs.length === 0}
+                      className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all flex items-center gap-1 ${
+                        isCopied
+                          ? "bg-emerald-950/60 border-emerald-800/60 text-emerald-400 font-bold"
+                          : "bg-[#161619] hover:bg-blue-950/60 hover:text-blue-400 border-[#2a2a2c] hover:border-blue-800/40 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                      }`}
+                      title="Copy currently filtered logs as plain text to clipboard"
+                      id="btn-copy-logs"
+                    >
+                      {isCopied ? (
+                        <>
+                          <Check className="h-3 w-3 text-emerald-400" />
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3 text-blue-400" />
+                          Copy
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -515,14 +1228,18 @@ export default function App() {
                       filteredLogs.map((log, index) => {
                         let color = "text-gray-400";
                         if (log.includes("[CRITICAL]") || log.includes("[ALERT]") || log.includes("ATTACK DETECTED")) {
-                          color = "text-red-400 font-bold bg-red-950/20 px-1 py-0.5 rounded";
+                          color = "text-red-400 font-bold bg-red-950/20 px-1.5 py-0.5 rounded";
                         } else if (log.includes("[WARN]")) {
-                          color = "text-orange-400 bg-orange-950/20 px-1 py-0.5 rounded";
+                          color = "text-orange-400 bg-orange-950/20 px-1.5 py-0.5 rounded";
                         }
+                        const lineNum = String(index + 1).padStart(2, "0");
                         return (
-                          <p key={index} className={`${color}`}>
-                            {log}
-                          </p>
+                          <div key={index} className={`flex items-start gap-2.5 ${color}`}>
+                            <span className="text-gray-600 font-mono text-[10px] select-none shrink-0 w-6 text-right pt-0.5 font-medium border-r border-[#2a2a2c] pr-1.5">
+                              {lineNum}
+                            </span>
+                            <span className="break-all flex-1">{log}</span>
+                          </div>
                         );
                       })
                     )}
@@ -587,6 +1304,113 @@ export default function App() {
           Container Ingress 127.0.0.1:3000 • Production Sandboxed Environment
         </p>
       </footer>
+
+      {/* Export Toast Notification Overlay */}
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-none" id="export-toast-overlay">
+        <AnimatePresence>
+          {exportToasts.map((toast) => (
+            <motion.div
+              key={toast.id}
+              initial={{ opacity: 0, y: 20, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.95 }}
+              transition={{ duration: 0.2 }}
+              className={`pointer-events-auto shadow-2xl rounded-lg border bg-[#121216]/95 backdrop-blur-md p-3.5 text-xs text-gray-200 flex items-start gap-3 relative overflow-hidden ${
+                toast.format === "JSON" 
+                  ? "border-amber-800/60 border-l-4 border-l-amber-500 shadow-amber-950/20" 
+                  : "border-emerald-800/60 border-l-4 border-l-emerald-500 shadow-emerald-950/20"
+              }`}
+            >
+              <div className="p-1.5 rounded-md bg-[#1a1a20] shrink-0 mt-0.5">
+                {toast.format === "JSON" ? (
+                  <FileJson className="h-4 w-4 text-amber-400" />
+                ) : (
+                  <FileSpreadsheet className="h-4 w-4 text-emerald-400" />
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0 pr-4">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="font-semibold text-gray-100 flex items-center gap-1 text-[13px]">
+                    <CheckCircle className="h-3.5 w-3.5 text-emerald-400" />
+                    Export Successful
+                  </span>
+                  <span className={`text-[10px] font-bold font-mono px-1.5 py-0.2 rounded uppercase ${
+                    toast.format === "JSON" 
+                      ? "bg-amber-950/80 text-amber-300 border border-amber-800/50" 
+                      : "bg-emerald-950/80 text-emerald-300 border border-emerald-800/50"
+                  }`}>
+                    {toast.format}
+                  </span>
+                </div>
+
+                <p className="text-gray-300 text-[11px] font-mono truncate mb-1" title={toast.filename}>
+                  File: <span className="text-white font-semibold">{toast.filename}</span>
+                </p>
+
+                <div className="flex items-center justify-between text-[10px] text-gray-400 font-mono">
+                  <span>{toast.logCount} log entries</span>
+                  <span>{toast.timestamp}</span>
+                </div>
+              </div>
+
+              <button
+                onClick={() => dismissToast(toast.id)}
+                className="text-gray-500 hover:text-gray-300 p-1 rounded hover:bg-[#1a1a20] transition-colors absolute top-2 right-2"
+                title="Dismiss notification"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+      {/* Recurring Scheduled Exports Modal */}
+      <ScheduledExportsModal
+        isOpen={isScheduleModalOpen}
+        onClose={() => setIsScheduleModalOpen(false)}
+        nodes={nodes}
+        activeNodeId={activeNode.id}
+        jobs={scheduledJobs}
+        history={exportHistory}
+        onCreateJob={handleCreateScheduledJob}
+        onToggleJobStatus={handleToggleJobStatus}
+        onDeleteJob={handleDeleteJob}
+        onRunJobNow={handleRunJobNow}
+        onDownloadCompletedExport={handleDownloadCompletedExport}
+        onClearHistory={() => setExportHistory([])}
+      />
+      {/* Export Sample Preview Modal */}
+      <ExportPreviewModal
+        isOpen={isPreviewModalOpen}
+        onClose={() => setIsPreviewModalOpen(false)}
+        format={exportFormat}
+        node={activeNode}
+        filteredLogs={filteredLogs}
+        searchQuery={logSearchQuery}
+        severityFilter={logSeverityFilter}
+        startTime={exportStartTime}
+        endTime={exportEndTime}
+        exportColumns={exportColumns}
+        onToggleColumn={handleToggleExportColumn}
+        onSelectAllColumns={handleSelectAllColumns}
+        onSelectMinimalColumns={handleSelectMinimalColumns}
+        onConfirmExport={() => setIsConfirmModalOpen(true)}
+      />
+      {/* Export Confirmation Summary Modal */}
+      <ExportConfirmModal
+        isOpen={isConfirmModalOpen}
+        onClose={() => setIsConfirmModalOpen(false)}
+        onConfirm={() => handleExportLogs()}
+        format={exportFormat}
+        node={activeNode}
+        filteredLogsCount={filteredLogs.length}
+        searchQuery={logSearchQuery}
+        severityFilter={logSeverityFilter}
+        startTime={exportStartTime}
+        endTime={exportEndTime}
+        exportColumns={exportColumns}
+      />
     </div>
   );
 }

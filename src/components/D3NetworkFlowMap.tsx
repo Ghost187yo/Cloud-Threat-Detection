@@ -320,7 +320,9 @@ export function D3NetworkFlowMap({
                   className={isTargetAttacked ? "animate-[flow-attack_0.4s_linear_infinite]" : "animate-[flow-normal_1.5s_linear_infinite]"}
                   style={{
                     animationName: "flow-normal",
-                    animationDuration: isTargetAttacked ? "0.3s" : "1.2s"
+                    animationDuration: isTargetAttacked ? "0.3s" : "1.2s",
+                    animationTimingFunction: "linear",
+                    animationIterationCount: "infinite"
                   }}
                 />
                 {/* Glowing Flow Packets */}
@@ -412,8 +414,10 @@ export function D3NetworkFlowMap({
                   strokeDasharray={dashPattern}
                   className="transition-all duration-300"
                   style={{
-                    animation: `flow-normal ${flowSpeed} linear infinite`,
                     animationName: "flow-normal",
+                    animationDuration: flowSpeed,
+                    animationTimingFunction: "linear",
+                    animationIterationCount: "infinite",
                     strokeOpacity: isAttackActive ? 1.0 : 0.4
                   }}
                 />

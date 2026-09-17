@@ -38,9 +38,54 @@ export interface ThreatAnalysisResult {
   zeroDayAnalysis: string;
 }
 
+export interface ExportColumnOptions {
+  logIndex: boolean;
+  nodeId: boolean;
+  nodeName: boolean;
+  nodeType: boolean;
+  region: boolean;
+  ipAddress: boolean;
+  severity: boolean;
+  logContent: boolean;
+  exportedAt: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   sender: "user" | "assistant";
   content: string;
   timestamp: string;
 }
+
+export interface ScheduledExportJob {
+  id: string;
+  nodeId: string;
+  nodeName: string;
+  format: "json" | "csv";
+  intervalMinutes: number; // e.g., 15, 30, 60 (hourly), 360 (6 hours), 1440 (daily)
+  intervalLabel: string;
+  severityFilter: "all" | "critical";
+  status: "active" | "paused";
+  createdAt: string;
+  nextRunAt: number; // Unix timestamp in ms
+  lastRunAt?: string;
+  runCount: number;
+}
+
+export interface ExportHistoryRecord {
+  id: string;
+  jobId?: string;
+  nodeId: string;
+  nodeName: string;
+  filename: string;
+  format: "JSON" | "CSV";
+  logCount: number;
+  type: "Scheduled" | "Manual";
+  status: "Completed" | "Pending" | "Failed";
+  timestamp: string;
+  downloadData?: {
+    content: string;
+    mimeType: string;
+  };
+}
+
