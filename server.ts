@@ -137,6 +137,7 @@ app.post("/api/analyze-trace", async (req, res) => {
     {
       "threatIdentified": true or false,
       "urgency": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+      "threatProbabilityScore": "e.g., '98.5%' or '92.0%' - Estimated probability score that this trace represents an active exploit/threat",
       "vulnerabilityType": "e.g., SSRF, Remote Code Execution, Privilege Escalation, Zero-Day Memory Disclosure",
       "mechanismExplainer": "A thorough, step-by-step description of how this exploit behaves, why traditional signature detectors often miss it, and how it targets distributed cloud primitives.",
       "falsePositiveLikelihood": "A percentage (e.g. '5%') with short justification of why the confidence is high or low.",
@@ -278,6 +279,7 @@ function getSimulatedResponse(title: string, payload: string, logSnippet: string
     return {
       threatIdentified: true,
       urgency: scenarioMatch.urgency,
+      threatProbabilityScore: scenarioMatch.urgency === "CRITICAL" ? "98.4%" : "89.2%",
       vulnerabilityType: scenarioMatch.category,
       mechanismExplainer: scenarioMatch.description + " Analyzing the trace, the attack executes non-standard payloads designed to exploit specific state parameters or environment variables inside containers. The trace reveals out-of-bounds network request parameters bypassing traditional edge checks.",
       falsePositiveLikelihood: "2.4% - High-fidelity payload parameters identified in active logs.",
@@ -300,6 +302,7 @@ function getSimulatedResponse(title: string, payload: string, logSnippet: string
   return {
     threatIdentified: true,
     urgency: "HIGH",
+    threatProbabilityScore: "87.5%",
     vulnerabilityType: "Anomalous Resource Traversal",
     mechanismExplainer: "The log snippet indicates that an external user has injected nested parameter formats. This bypasses structural validation layers on the outer proxy, passing potentially executable segments downstream to target-internal components.",
     falsePositiveLikelihood: "12%",

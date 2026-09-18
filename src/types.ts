@@ -27,6 +27,7 @@ export interface SecurityScenario {
 export interface ThreatAnalysisResult {
   threatIdentified: boolean;
   urgency: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+  threatProbabilityScore?: string | number;
   vulnerabilityType: string;
   mechanismExplainer: string;
   falsePositiveLikelihood: string;
@@ -46,6 +47,7 @@ export interface ExportColumnOptions {
   region: boolean;
   ipAddress: boolean;
   severity: boolean;
+  threatProbability?: boolean;
   logContent: boolean;
   exportedAt: boolean;
 }

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { CloudNode, ExportColumnOptions } from "../types";
+import { CloudNode, ExportColumnOptions, ThreatAnalysisResult } from "../types";
+import { detectThreatsInLogs, getThreatProbabilityScore } from "../utils/threatScore";
 import { Eye, Download, Copy, Check, X, Info, SlidersHorizontal, CheckSquare, Square } from "lucide-react";
 import { motion } from "motion/react";
 
@@ -14,6 +15,7 @@ interface ExportPreviewModalProps {
   startTime: string;
   endTime: string;
   exportColumns: ExportColumnOptions;
+  analysis?: ThreatAnalysisResult | null;
   onToggleColumn: (key: keyof ExportColumnOptions) => void;
   onSelectAllColumns: () => void;
   onSelectMinimalColumns: () => void;
@@ -28,6 +30,7 @@ export const EXPORT_COLUMN_LABELS: Record<keyof ExportColumnOptions, string> = {
   region: "Region",
   ipAddress: "IP Address",
   severity: "Severity",
+  threatProbability: "Threat Probability Score",
   logContent: "Log Content",
   exportedAt: "Timestamp",
 };
@@ -43,6 +46,7 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
   startTime,
   endTime,
   exportColumns,
+  analysis,
   onToggleColumn,
   onSelectAllColumns,
   onSelectMinimalColumns,
@@ -55,6 +59,10 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
 
   const sampleLogs = filteredLogs.slice(0, 10);
   const nowIso = new Date().toISOString();
+
+  // Detect whether any threat exists in the active filtered logs or analysis
+  const hasThreatInLogs = detectThreatsInLogs(filteredLogs, analysis, node);
+  const includeThreatScore = hasThreatInLogs && (exportColumns.threatProbability !== false);
 
   let previewText = "";
 
@@ -77,6 +85,9 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
       if (exportColumns.region) rowObj.region = node.region;
       if (exportColumns.ipAddress) rowObj.ipAddress = node.ipAddress;
       if (exportColumns.severity) rowObj.severity = severity;
+      if (includeThreatScore) {
+        rowObj.threatProbabilityScore = getThreatProbabilityScore(logStr, analysis, node);
+      }
       if (exportColumns.logContent) rowObj.logContent = logStr;
       if (exportColumns.exportedAt) rowObj.exportedAt = nowIso;
 
@@ -104,6 +115,7 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
         activeColumnsCount: activeColumnCount,
         totalMatchedLogs: filteredLogs.length,
         sampleRowsCount: sampleLogs.length,
+        hasThreatDetected: hasThreatInLogs,
         logs: structuredSample
       },
       null,
@@ -118,6 +130,7 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
     if (exportColumns.region) headers.push("Region");
     if (exportColumns.ipAddress) headers.push("IP Address");
     if (exportColumns.severity) headers.push("Severity");
+    if (includeThreatScore) headers.push("Threat Probability Score");
     if (exportColumns.logContent) headers.push("Log Content");
     if (exportColumns.exportedAt) headers.push("Exported At");
 
@@ -139,6 +152,10 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({
         if (exportColumns.region) fields.push(`"${node.region}"`);
         if (exportColumns.ipAddress) fields.push(`"${node.ipAddress}"`);
         if (exportColumns.severity) fields.push(`"${severity}"`);
+        if (includeThreatScore) {
+          const score = getThreatProbabilityScore(logStr, analysis, node);
+          fields.push(`"${score}"`);
+        }
         if (exportColumns.logContent) fields.push(`"${logStr.replace(/"/g, '""')}"`);
         if (exportColumns.exportedAt) fields.push(`"${nowIso}"`);
 

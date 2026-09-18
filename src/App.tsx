@@ -13,6 +13,7 @@ import { D3ThreatForecastChart } from "./components/D3ThreatForecastChart";
 import { ScheduledExportsModal } from "./components/ScheduledExportsModal";
 import { ExportPreviewModal, EXPORT_COLUMN_LABELS } from "./components/ExportPreviewModal";
 import { ExportConfirmModal } from "./components/ExportConfirmModal";
+import { detectThreatsInLogs, getThreatProbabilityScore } from "./utils/threatScore";
 import { Shield, Server, Clock, HelpCircle, Activity, LayoutGrid, Terminal, Info, Search, X, Download, FileJson, FileSpreadsheet, Copy, Check, CheckCircle, Calendar, Eye, Loader2, SlidersHorizontal, CheckSquare, Square } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -165,6 +166,7 @@ export default function App() {
     region: true,
     ipAddress: true,
     severity: true,
+    threatProbability: true,
     logContent: true,
     exportedAt: true,
   });
@@ -186,6 +188,7 @@ export default function App() {
       region: true,
       ipAddress: true,
       severity: true,
+      threatProbability: true,
       logContent: true,
       exportedAt: true,
     });
@@ -200,6 +203,7 @@ export default function App() {
       region: false,
       ipAddress: false,
       severity: true,
+      threatProbability: true,
       logContent: true,
       exportedAt: false,
     });
@@ -285,7 +289,19 @@ export default function App() {
       });
     } else {
       mimeType = "text/csv";
-      const headers = ["Log Index", "Node ID", "Node Name", "Node Type", "Region", "IP Address", "Severity", "Log Content", "Exported At"];
+      const hasThreatInLogs = detectThreatsInLogs(targetLogs, analysisResult, targetNode);
+      const headers = [
+        "Log Index",
+        "Node ID",
+        "Node Name",
+        "Node Type",
+        "Region",
+        "IP Address",
+        "Severity",
+        ...(hasThreatInLogs ? ["Threat Probability Score"] : []),
+        "Log Content",
+        "Exported At"
+      ];
       const csvRows = [
         headers.join(","),
         ...targetLogs.map((logStr, idx) => {
@@ -296,7 +312,20 @@ export default function App() {
             severity = "WARN";
           }
           const cleanLog = `"${logStr.replace(/"/g, '""')}"`;
-          return [idx + 1, targetNode.id, `"${targetNode.name}"`, `"${targetNode.type}"`, `"${targetNode.region}"`, targetNode.ipAddress, severity, cleanLog, exportTimestamp].join(",");
+          const score = getThreatProbabilityScore(logStr, analysisResult, targetNode);
+          const rowFields = [
+            idx + 1,
+            targetNode.id,
+            `"${targetNode.name}"`,
+            `"${targetNode.type}"`,
+            `"${targetNode.region}"`,
+            targetNode.ipAddress,
+            severity,
+            ...(hasThreatInLogs ? [`"${score}"`] : []),
+            cleanLog,
+            exportTimestamp
+          ];
+          return rowFields.join(",");
         })
       ];
       contentString = csvRows.join("\n");
@@ -528,6 +557,9 @@ export default function App() {
         const fullFileName = `${filename}.json`;
         addExportToast(fullFileName, "JSON", filteredLogs.length);
       } else if (format === "csv") {
+        const hasThreatInLogs = detectThreatsInLogs(filteredLogs, analysisResult, activeNode);
+        const includeThreatScore = hasThreatInLogs && (exportColumns.threatProbability !== false);
+
         const activeHeaders: string[] = [];
         if (exportColumns.logIndex) activeHeaders.push("Log Index");
         if (exportColumns.nodeId) activeHeaders.push("Node ID");
@@ -536,6 +568,7 @@ export default function App() {
         if (exportColumns.region) activeHeaders.push("Region");
         if (exportColumns.ipAddress) activeHeaders.push("IP Address");
         if (exportColumns.severity) activeHeaders.push("Severity");
+        if (includeThreatScore) activeHeaders.push("Threat Probability Score");
         if (exportColumns.logContent) activeHeaders.push("Log Content");
         if (exportColumns.exportedAt) activeHeaders.push("Exported At");
 
@@ -557,6 +590,10 @@ export default function App() {
             if (exportColumns.region) fields.push(`"${activeNode.region}"`);
             if (exportColumns.ipAddress) fields.push(`"${activeNode.ipAddress}"`);
             if (exportColumns.severity) fields.push(`"${severity}"`);
+            if (includeThreatScore) {
+              const score = getThreatProbabilityScore(logStr, analysisResult, activeNode);
+              fields.push(`"${score}"`);
+            }
             if (exportColumns.logContent) fields.push(`"${logStr.replace(/"/g, '""')}"`);
             if (exportColumns.exportedAt) fields.push(`"${exportTimestamp}"`);
 
@@ -1392,6 +1429,7 @@ export default function App() {
         startTime={exportStartTime}
         endTime={exportEndTime}
         exportColumns={exportColumns}
+        analysis={analysisResult}
         onToggleColumn={handleToggleExportColumn}
         onSelectAllColumns={handleSelectAllColumns}
         onSelectMinimalColumns={handleSelectMinimalColumns}
@@ -1404,12 +1442,14 @@ export default function App() {
         onConfirm={() => handleExportLogs()}
         format={exportFormat}
         node={activeNode}
+        filteredLogs={filteredLogs}
         filteredLogsCount={filteredLogs.length}
         searchQuery={logSearchQuery}
         severityFilter={logSeverityFilter}
         startTime={exportStartTime}
         endTime={exportEndTime}
         exportColumns={exportColumns}
+        analysis={analysisResult}
       />
     </div>
   );
